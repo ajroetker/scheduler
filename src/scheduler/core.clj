@@ -18,7 +18,15 @@
 
   )
 
-(def prof-dept-map (atom {}))
+(def prof-dept-map
+  {"Keith Karoly" "Economics" "Jim Fix" "Mathematics"
+   "Suzy Renn" "Economics" "Angelina Jolie" "Biology"
+   "Paul Hovda" "Economics" "Jamie Pommershiem" "Biology"
+   "Bruce Wayne" "Physics" "Clark Kent" "Sociology"
+   "Diana Wayne" "Physics" "Lois Kent" "Sociology"
+   "Wally West" "Anthropology" "Sonia Sabnis" "Classics"
+   "Ellen Millender" "Anthropology" "Wally Englert" "Classics"
+   "Tom Weiting" "Biology"  "Jeff Parker" "Mathematics"})
 
 (defn pcross
   [& seqs]
@@ -40,6 +48,10 @@
 (defn remove-nil-keys
   [m]
   (into {} (filter (complement #((comp nil? key) %)) m)))
+
+(defn num-third-readers
+  [orals]
+  (reduce (fn [accum oral] (if (:third oral) (inc accum) accum)) 0 orals))
 
 (defn equal-sizes
   [c1 c2]
@@ -70,7 +82,7 @@
                    (let [avail-today (- avail-before (or (prof-count-day prof-name) 0))]
                      ;; BROKENESSSS := if the number of slots is less than three, fucked up shit
                      ;; ......annnnd profs get assigned more than limit atm
-                     (assoc pool prof-name (if (> 1 avail-today) 0 3))))]
+                     (assoc pool prof-name (if (> 3 avail-today) avail-today 3))))]
     (reduce add-prof {} profs-count-so-far)))
 
 (defn profs-count-week
@@ -103,7 +115,7 @@
 (defn week-builder-helper
   [students week-accum rooms time-slots days]
   (if (or (= days 0) (empty? students))
-    (set week-accum)
+    (into #{} (map #(filter (complement empty?) %) (set week-accum)))
     (let [add-day (make-add-day students rooms time-slots)]
       (week-builder-helper students (mapcat add-day week-accum) rooms time-slots (dec days)))))
 
@@ -143,24 +155,25 @@
   ([orals-boards]
    (remove-nil-keys (reduce reducer-counter-dept {} orals-boards)))
   ([period-pool dept-map]
-   (remove-nil-keys (reduce (partial reducer-counter-dept dept-map) period-pool))))
+   (remove-nil-keys (reduce (partial reducer-counter-dept dept-map) {} period-pool))))
 
 (defn dept-filter-period
-  [period period-pf-pools prof-dept-map]
+  [period period-pf-pools]
   (let [dept-day-count (dept-count period)
         make-dept-pool-count (fn [period-pool] (dept-count period-pool prof-dept-map))
         make-merged-pf-maps (fn [period-pool] (merge-with + dept-day-count (make-dept-pool-count period-pool)))]
-    (filter #(some (fn [[k v]] (< (count period) v)) (make-merged-pf-maps %)) period-pf-pools)))
+    (filter (complement #(some (fn [[k v]] (< (count period) v)) (make-merged-pf-maps %))) period-pf-pools)))
 
 (defn third-reader-accum
   [week prof-map full-week-accum]
   (if-let [day (first week)]
     (let [day-pool-map (profs-count-day day prof-map)
           day-pool-list (pf-map-to-pool day-pool-map)
-          day-pools (combinations day-pool-list (count day))
+          orals-wo-third (- (count day) (num-third-readers day))
+          day-pools (combinations day-pool-list orals-wo-third)
           ;;Here's where we would filter for dept
-          ;;day-pools-filtered (dept-filter-period day day-pools)
-          random-day-pool (rand-nth day-pools)
+          day-pools-filtered (dept-filter-period day day-pools)
+          random-day-pool (if (empty? day-pools-filtered) '() (rand-nth day-pools-filtered))
           updated-prof-map (update-profs prof-map random-day-pool)
           updated-accum (conj full-week-accum [day random-day-pool])]
       (third-reader-accum (rest week) updated-prof-map updated-accum))
@@ -211,10 +224,11 @@
             (if (empty? day)
               profs-map
               (update-profs profs-map (mapcat (comp first rest) day))))
-          valid-profs (filter #(= rooms (count %)) (map set (combinations left-over-profs rooms)))
+          needed-thirds (- rooms (num-third-readers slot))
+          valid-profs (filter #(= needed-thirds (count %)) (map set (combinations left-over-profs needed-thirds)))
           in-slot-already? (fn [s] (some (fn [v] (= s v)) (mapcat vals slot)))
-          ;;more-valid-profs (dept-filter-period slot left-over-students prof-dept-map)
-          new-profs (into #{} (filter (complement #(some true? (map in-slot-already? %))) valid-profs))]
+          more-valid-profs (dept-filter-period slot valid-profs)
+          new-profs (into #{} (filter (complement #(some true? (map in-slot-already? %))) more-valid-profs))]
       (if (empty? new-profs)
         (list day)
         (for [pool new-profs] (conj day [slot pool]))))))
@@ -242,6 +256,33 @@
   first and second readers, add the third"
   [readers faculty-member]
   (assoc readers :third faculty-member))
+
+(defn grab-third-reader
+  [orals prof]
+  (if-let [oral (first orals)]
+    (if (or (= (prof-dept-map prof) (:department oral)) (:third oral))
+      (grab-third-reader (rest orals) prof)
+      (add-third-reader oral prof)
+      )))
+
+(defn merge-third-readers-helper
+  [orals profs accum]
+  (if-let [pf (first profs)]
+    (let [works (grab-third-reader orals pf)
+          after-orals (filter #(not (= (:student works) (:student %))) orals)
+          new-accum (conj accum works)]
+      (merge-third-readers-helper after-orals (rest profs) new-accum))
+    accum))
+
+(defn merge-third-readers
+  [orals-boards profs]
+  (merge-third-readers-helper orals-boards profs []))
+
+(defn assemble-week
+  [week]
+  (for [day week]
+    (for [slot day]
+      (merge-third-readers (first slot) (second slot)))))
 
 (defn -main
   [& args]
